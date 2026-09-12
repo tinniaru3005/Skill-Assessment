@@ -4,6 +4,7 @@ import { AzureKeyCredential } from "@azure/core-auth";
 import { registry } from "../utils/circuitBreaker.js";
 import logger from "../utils/logger.js";
 import { createSseStream } from "@azure/core-sse";
+import { createHash } from "node:crypto";
 
 const PRIMARY_MODEL = "gpt-4.1-mini";
 const FALLBACK_MODEL = "gpt-4.1-nano";
@@ -42,17 +43,23 @@ class AIService {
       new AzureKeyCredential(this.apiKey)
     );
 
-    // Initialize circuit breakers for each model
-    this.primaryCircuit = registry.getBreaker('ai-primary', {
+    // Circuit breakers are scoped per API key (a short, non-reversible hash -
+    // never the raw key) rather than one shared pair for the whole process.
+    // Without this, one caller's invalid or rate-limited key could trip the
+    // breaker OPEN and make every *other* caller's requests fail immediately
+    // too, even with a perfectly healthy key.
+    const keyScope = createHash('sha256').update(this.apiKey).digest('hex').slice(0, 12);
+
+    this.primaryCircuit = registry.getBreaker(`ai-primary:${keyScope}`, {
       failureThreshold: 3,
       timeout: 60000, // 1 minute
-      name: `ai-${PRIMARY_MODEL}`
+      name: `ai-${PRIMARY_MODEL}:${keyScope}`
     });
 
-    this.fallbackCircuit = registry.getBreaker('ai-fallback', {
+    this.fallbackCircuit = registry.getBreaker(`ai-fallback:${keyScope}`, {
       failureThreshold: 5,
       timeout: 120000, // 2 minutes for fallback
-      name: `ai-${FALLBACK_MODEL}`
+      name: `ai-${FALLBACK_MODEL}:${keyScope}`
     });
   }
 
@@ -443,8 +450,10 @@ Respond ONLY with this JSON schema:
 
       if (isUnexpected(response)) {
         const errorMsg = response.body.error?.message || 'Unknown AI API error';
-        logger.error('AI chat model error', { model, error: errorMsg });
-        throw new Error(`AI API error: ${errorMsg}`);
+        logger.error('AI chat model error', { model, error: errorMsg, status: response.status });
+        const err = new Error(`AI API error: ${errorMsg}`);
+        err.statusCode = Number(response.status) || undefined;
+        throw err;
       }
 
       return response.body.choices[0].message.content;
@@ -491,7 +500,9 @@ Respond ONLY with this JSON schema:
         .asNodeStream();
 
       if (response.status !== '200') {
-        throw new Error(`AI API error (stream): unexpected status ${response.status}`);
+        const err = new Error(`AI API error (stream): unexpected status ${response.status}`);
+        err.statusCode = Number(response.status) || undefined;
+        throw err;
       }
       if (!response.body) {
         throw new Error('AI stream response body is undefined');
