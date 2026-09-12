@@ -92,12 +92,20 @@ const AiChatPage: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to the latest message (or the typing indicator) any time the
-  // conversation changes - covers a new message, an error bubble, and the
-  // typing indicator appearing/disappearing.
+  // The in-progress assistant reply while a stream is coming in - held
+  // separately from `messages` and only appended there once the stream ends
+  // (cleanly or with an error), so a dropped connection mid-reply can't leave
+  // a half-written message permanently stuck in the transcript.
+  const [streamingReply, setStreamingReply] = useState<{
+    content: string;
+    properties?: ChatPropertyCard[];
+  } | null>(null);
+
+  // Auto-scroll to the latest message (or the typing indicator/streaming
+  // reply) any time the conversation changes.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages, sending]);
+  }, [messages, sending, streamingReply]);
 
   const sendMessage = async (overrideText?: string) => {
     const trimmed = (overrideText ?? input).trim();
@@ -112,17 +120,62 @@ const AiChatPage: React.FC = () => {
     setMessages((prev) => [...prev, { role: 'user', content: trimmed }]);
     if (!overrideText) setInput('');
     setSending(true);
+    setStreamingReply(null);
+
+    let reply: { content: string; properties?: ChatPropertyCard[] } | null = null;
+    let streamError: any = null;
 
     try {
-      const response = await aiAPI.chat({ message: trimmed, history });
-      const reply: string = response.data?.reply || "Sorry, I didn't get a response there. Please try again.";
-      const properties: ChatPropertyCard[] | undefined = response.data?.properties;
-      setMessages((prev) => [...prev, { role: 'assistant', content: reply, properties }]);
+      for await (const evt of aiAPI.chatStream({ message: trimmed, history })) {
+        if (evt.event === 'meta') {
+          // Arrives first - lets matched listings show up before the model
+          // has written a single word of the reply.
+          reply = { content: '', properties: evt.data?.properties };
+          setStreamingReply(reply);
+        } else if (evt.event === 'delta') {
+          const priorContent: string = reply ? reply.content : '';
+          const priorProperties: ChatPropertyCard[] | undefined = reply ? reply.properties : undefined;
+          reply = { content: priorContent + (evt.data?.content ?? ''), properties: priorProperties };
+          setStreamingReply(reply);
+        } else if (evt.event === 'error') {
+          // Shaped like an axios error so describeChatError() (shared with
+          // the pre-stream validation/key errors below) can classify it.
+          streamError = { response: { data: evt.data } };
+          break;
+        }
+        // 'done' needs no handling here - the loop simply ends right after.
+      }
     } catch (err: any) {
-      const { message, isKeyError } = describeChatError(err);
-      setMessages((prev) => [...prev, { role: 'system', content: message, retryText: trimmed }]);
-      if (isKeyError) setShowKeyModal(true);
+      streamError = err;
     } finally {
+      setStreamingReply(null);
+
+      if (reply && reply.content) {
+        const finishedReply = reply;
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: finishedReply.content, properties: finishedReply.properties },
+        ]);
+      }
+
+      if (streamError) {
+        const { message, isKeyError } = describeChatError(streamError);
+        setMessages((prev) => [...prev, { role: 'system', content: message, retryText: trimmed }]);
+        if (isKeyError) setShowKeyModal(true);
+      } else if (!reply || !reply.content) {
+        // Stream ended with no text and no error event (e.g. the connection
+        // dropped right after `meta`) - fall back to a plain notice rather
+        // than showing nothing, but keep any matched listings that did arrive.
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: "Sorry, I didn't get a response there. Please try again.",
+            properties: reply?.properties,
+          },
+        ]);
+      }
+
       setSending(false);
     }
   };
@@ -143,10 +196,10 @@ const AiChatPage: React.FC = () => {
     <div className="bg-white min-h-screen flex flex-col">
       <Navbar />
 
-      <section className="flex-1 pt-28 pb-10 px-4 sm:px-6">
-        <div className="max-w-[900px] mx-auto flex flex-col h-[calc(100vh-180px)] min-h-[480px]">
-          <div className="mb-4">
-            <h1 className="text-2xl font-bold text-gray-900">AI Chat Assistant</h1>
+      <section className="flex-1 pt-24 pb-6 px-3 sm:pt-28 sm:pb-10 sm:px-6">
+        <div className="max-w-[900px] mx-auto flex flex-col h-[calc(100dvh-160px)] sm:h-[calc(100vh-180px)] min-h-[420px]">
+          <div className="mb-3 sm:mb-4">
+            <h1 className="text-xl sm:text-2xl font-bold text-gray-900">AI Chat Assistant</h1>
             <p className="text-sm text-gray-500 mt-1">
               Ask about properties, prices, or the market — I'm here to help.
             </p>
@@ -167,7 +220,7 @@ const AiChatPage: React.FC = () => {
           )}
 
           {/* Message list */}
-          <div className="flex-1 overflow-y-auto rounded-xl border border-gray-200 bg-gray-50/60 p-4 space-y-3">
+          <div className="flex-1 overflow-y-auto rounded-xl border border-gray-200 bg-gray-50/60 p-3 sm:p-4 space-y-3">
             {messages.map((m, i) => (
               <ChatBubble
                 key={i}
@@ -180,12 +233,16 @@ const AiChatPage: React.FC = () => {
             {messages.length === 1 && !sending && (
               <QuickSuggestions onSelect={(text) => sendMessage(text)} />
             )}
-            {sending && <TypingIndicator />}
+            {streamingReply && (streamingReply.content || streamingReply.properties?.length) ? (
+              <ChatBubble role="assistant" content={streamingReply.content} properties={streamingReply.properties} />
+            ) : (
+              sending && <TypingIndicator />
+            )}
             <div ref={messagesEndRef} />
           </div>
 
           {/* Input row */}
-          <form onSubmit={handleSubmit} className="mt-4 flex items-end gap-2">
+          <form onSubmit={handleSubmit} className="mt-3 sm:mt-4 flex items-end gap-2">
             <input
               type="text"
               value={input}
@@ -193,13 +250,13 @@ const AiChatPage: React.FC = () => {
               onKeyDown={handleKeyDown}
               placeholder="Ask about properties, prices, or the market..."
               disabled={sending}
-              className="flex-1 rounded-full border border-gray-300 bg-white px-4 py-2.5 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:opacity-60"
+              className="flex-1 min-w-0 rounded-full border border-gray-300 bg-white px-3.5 sm:px-4 py-2.5 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:opacity-60"
             />
             <button
               type="submit"
               disabled={sending || !input.trim()}
               aria-label="Send message"
-              className="inline-flex items-center justify-center rounded-full bg-primary size-10 shrink-0 text-white transition-colors hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="inline-flex items-center justify-center rounded-full bg-primary size-11 shrink-0 text-white transition-colors hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Send className="size-4" />
             </button>
@@ -274,7 +331,7 @@ const ChatBubble: React.FC<{
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
       <div
-        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm ${
+        className={`max-w-[88%] sm:max-w-[75%] rounded-2xl px-4 py-2.5 text-sm ${
           isUser
             ? 'rounded-br-sm whitespace-pre-wrap bg-primary text-white'
             : 'rounded-bl-sm border border-gray-200 bg-white text-gray-800'
@@ -289,7 +346,7 @@ const ChatBubble: React.FC<{
 
 /** Horizontally-scrollable row of matching listings, shown under an assistant reply. */
 const PropertyResultCards: React.FC<{ properties: ChatPropertyCard[] }> = ({ properties }) => (
-  <div className="mt-2 flex max-w-[80%] gap-3 overflow-x-auto pb-1">
+  <div className="mt-2 flex max-w-[92%] sm:max-w-[75%] gap-3 overflow-x-auto pb-1">
     {properties.map((property) => (
       <PropertyResultCard key={property.id} property={property} />
     ))}
@@ -300,9 +357,9 @@ const PropertyResultCards: React.FC<{ properties: ChatPropertyCard[] }> = ({ pro
 const PropertyResultCard: React.FC<{ property: ChatPropertyCard }> = ({ property }) => (
   <Link
     to={`/property/${property.id}`}
-    className="block w-[220px] shrink-0 overflow-hidden rounded-xl border border-gray-200 bg-white transition-shadow hover:shadow-md"
+    className="block w-[170px] sm:w-[220px] shrink-0 overflow-hidden rounded-xl border border-gray-200 bg-white transition-shadow hover:shadow-md"
   >
-    <div className="h-28 w-full bg-gray-100">
+    <div className="h-24 sm:h-28 w-full bg-gray-100">
       {property.image ? (
         <img src={property.image} alt={property.title} className="h-full w-full object-cover" />
       ) : (
