@@ -163,6 +163,12 @@ export const aiAPI = {
         ...(githubKey && { 'X-Github-Key': githubKey }),
         ...(firecrawlKey && { 'X-Firecrawl-Key': firecrawlKey }),
       },
+      // Validation calls out to GitHub Models + Firecrawl for real - on a slow
+      // or unreachable network that can hang far longer than a user should
+      // ever be stuck on a "Verifying..." button. Cap it client-side so the
+      // caller (AIApiKeyModal) can fall back to saving the keys unverified
+      // instead of blocking forever.
+      timeout: 12000,
     });
   },
 
