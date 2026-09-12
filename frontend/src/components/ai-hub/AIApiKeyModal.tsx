@@ -65,27 +65,45 @@ const AIApiKeyModal: React.FC<AIApiKeyModalProps> = ({ isOpen, onClose, onKeysCh
 
     setSaving(true);
 
-    try {
-      await aiAPI.validateKeys({
-        githubKey: effectiveGithub,
-        firecrawlKey: effectiveFirecrawl,
-      });
-
+    const saveKeys = () => {
       if (enteredGithub) {
         apiKeyStorage.setGithubKey(enteredGithub);
       }
       if (enteredFirecrawl) {
         apiKeyStorage.setFirecrawlKey(enteredFirecrawl);
       }
-
       setGithubKey('');
       setFirecrawlKey('');
+    };
+
+    try {
+      await aiAPI.validateKeys({
+        githubKey: effectiveGithub,
+        firecrawlKey: effectiveFirecrawl,
+      });
+
+      saveKeys();
       showToast('success', 'Keys verified and saved! Stored only in your browser.');
       onKeysChanged();
     } catch (err: any) {
-      const msg = err?.response?.data?.message || 'Could not verify API keys. Please check and try again.';
-      showToast('error', msg);
-      return;
+      // A response from our backend means the keys were actually checked and
+      // rejected (invalid/expired key, credits exhausted, etc.) - that should
+      // keep blocking the save. But no response at all (a client-side
+      // timeout, or the request never reaching the server) just means we
+      // couldn't verify right now, often due to network conditions outside
+      // the app's control - in that case, save the keys unverified rather
+      // than leaving the user stuck on "Verifying Keys..." indefinitely.
+      // They still won't work if truly invalid; the very first real AI Hub /
+      // chat call will surface that with a clear error at that point.
+      if (err?.response) {
+        const msg = err.response?.data?.message || 'Could not verify API keys. Please check and try again.';
+        showToast('error', msg);
+        return;
+      }
+
+      saveKeys();
+      showToast('success', "Couldn't reach the validation service, so keys were saved unverified. They'll be checked on first use.");
+      onKeysChanged();
     } finally {
       setSaving(false);
     }
