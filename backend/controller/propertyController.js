@@ -3,6 +3,7 @@ import { createFirecrawlService } from '../services/firecrawlService.js';
 import { createAIService } from '../services/aiService.js';
 import { validateAndFixPropertyAnalysis, validateAndFixLocationAnalysis } from '../utils/validateAIResponse.js';
 import { validateChatRequest } from '../utils/validateChatRequest.js';
+import { detectChatIntent } from '../utils/detectChatIntent.js';
 import imagekit from '../config/imagekit.js';
 import Property from '../models/propertyModel.js';
 import SearchCache from '../models/searchCacheModel.js';
@@ -663,11 +664,76 @@ export const deleteUserListing = async (req, res) => {
 };
 
 /**
+ * Find a small set of active listings matching the filters extracted from a
+ * chat message. Deliberately simple (local DB query, no external calls) so
+ * a chat turn stays fast - this is not the heavier Firecrawl-backed search
+ * used by /ai/search.
+ */
+export function buildPropertyQuery(filters = {}) {
+    const query = { $or: [{ status: 'active' }, { status: { $exists: false } }] };
+
+    if (filters.location) {
+        query.location = { $regex: filters.location, $options: 'i' };
+    }
+    if (filters.type) {
+        query.type = { $regex: `^${filters.type}$`, $options: 'i' };
+    }
+    if (filters.beds) {
+        query.beds = { $gte: filters.beds };
+    }
+    if (filters.maxPrice) {
+        query.price = { $lte: filters.maxPrice };
+    }
+
+    return query;
+}
+
+async function findMatchingProperties(filters, limit = 5) {
+    const query = buildPropertyQuery(filters);
+    // maxTimeMS guards against a slow/unreachable DB turning one chat message
+    // into a hung request - findMatchingProperties() is already wrapped in a
+    // try/catch by the caller, which falls back to a plain reply with no
+    // listings attached.
+    return Property.find(query).sort({ createdAt: -1 }).limit(limit).maxTimeMS(5000);
+}
+
+/** Trim a Property document down to what the frontend chat UI needs for a card. */
+function toChatPropertyCard(property) {
+    return {
+        id: property._id,
+        title: property.title,
+        location: property.location,
+        price: property.price,
+        beds: property.beds,
+        baths: property.baths,
+        sqm: property.sqm,
+        type: property.type,
+        availability: property.availability,
+        image: Array.isArray(property.image) ? property.image[0] : property.image,
+    };
+}
+
+/** Compact summary of matched properties to hand the AI as grounding context. */
+function summarizePropertiesForAI(properties) {
+    return properties.map((p) => ({
+        title: p.title,
+        location: p.location,
+        price: p.price,
+        beds: p.beds,
+        baths: p.baths,
+        sqm: p.sqm,
+        type: p.type,
+        availability: p.availability,
+    }));
+}
+
+/**
  * POST /api/ai/chat
  * Conversational AI assistant. Accepts { message, history, context } and
- * returns a single assistant reply. Non-streaming (see the streaming PR
- * for the SSE variant) - shares the AI rate-limit budget via the aiLimiter
- * middleware applied on the route.
+ * returns a single assistant reply, plus the detected intent and any
+ * matching property listings for property-search turns. Non-streaming
+ * (see the streaming PR for the SSE variant) - shares the AI rate-limit
+ * budget via the aiLimiter middleware applied on the route.
  */
 export const chatWithAI = async (req, res) => {
     const validation = validateChatRequest(req.body);
@@ -694,11 +760,36 @@ export const chatWithAI = async (req, res) => {
 
     const { aiService } = services;
 
+    // ── Intent detection ──────────────────────────────────────────────────
+    // Rule-based, not an extra AI call: instant, free, and easy to explain
+    // in the Loom walkthrough. Only decides *whether* to look up listings;
+    // the AI still writes the actual reply.
+    const { intent, filters } = detectChatIntent(message);
+
+    let matchedProperties = [];
+    if (intent === 'property_search') {
+        try {
+            matchedProperties = await findMatchingProperties(filters);
+        } catch (dbErr) {
+            // A DB hiccup shouldn't take down the whole chat turn - fall back
+            // to a plain conversational reply with no listings attached.
+            logger.warn('Property lookup for chat failed', { error: dbErr.message });
+            matchedProperties = [];
+        }
+    }
+
+    const chatContext = { ...context };
+    if (matchedProperties.length > 0) {
+        chatContext.matchedProperties = summarizePropertiesForAI(matchedProperties);
+    }
+
     try {
-        const reply = await aiService.chat(message, history, context);
+        const reply = await aiService.chat(message, history, chatContext);
         res.json({
             success: true,
             reply,
+            intent,
+            properties: matchedProperties.map(toChatPropertyCard),
             timestamp: new Date().toISOString(),
         });
     } catch (error) {
