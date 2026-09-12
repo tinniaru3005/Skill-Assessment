@@ -9,6 +9,7 @@ This is a **full-stack real estate platform** built for evaluating engineering c
 
 **Core Features:**
 - 🔍 AI-powered property search (Firecrawl + GPT-4.1)
+- 💬 AI Chat Assistant — conversational property search with streaming, markdown, and inline property cards
 - 🏢 Admin dashboard (CRUD operations)
 - 📅 Appointment scheduling
 - 📊 Real-time analytics
@@ -113,6 +114,21 @@ User's browser (localStorage)
 |---|---|---|
 | GitHub Models (GPT-4.1) | [github.com/marketplace/models](https://github.com/marketplace/models) | Free with any GitHub account |
 | Firecrawl (web scraping) | [firecrawl.dev](https://firecrawl.dev) | 500 free credits/month |
+<br/>
+
+### 💬 AI Chat Assistant
+
+A conversational assistant at **`/ai-chat`** that lets users ask natural-language
+questions ("find me a 3-bedroom flat in Bangalore under 50 lakh"), get a
+conversational reply, and — when the message reads as a property search — see
+live property cards pulled straight from the database inline in the chat.
+
+- `POST /api/ai/chat` — single-turn JSON reply (message + history + context in, reply + intent + properties out)
+- `POST /api/ai/chat/stream` — Server-Sent Events variant of the same turn, streamed token-by-token
+- Uses the same **user-owned API keys** as the AI Hub above (`X-Github-Key` / `X-Firecrawl-Key` headers) — no separate setup needed
+- Rule-based intent detection decides whether to look up live listings; the AI never invents specific listings/prices that weren't handed to it in context
+- See **`APPROACH.txt`** at the repo root for the full write-up (AI choice, prompt engineering, key decisions, trade-offs)
+
 <br/>
 
 ### 📊 Admin Dashboard
@@ -361,6 +377,8 @@ npm run dev   # Starts admin panel on http://localhost:5174
 |---|---|---|
 | POST | /api/ai/search | AI property search (requires user API keys) |
 | GET | /api/locations/:city/trends | Location market trends (requires user API keys) |
+| POST | /api/ai/chat | AI Chat Assistant — single-turn reply (requires user API keys) |
+| POST | /api/ai/chat/stream | AI Chat Assistant — SSE streaming variant (requires user API keys) |
 | POST | /api/forms/submit | Contact form submission |
 | GET | /api/admin/stats | Dashboard statistics (admin) |
 

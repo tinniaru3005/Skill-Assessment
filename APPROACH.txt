@@ -1,0 +1,159 @@
+AI Chat Assistant — Approach
+================================================================================
+
+FEATURE SUMMARY
+----------------
+A conversational AI assistant added to the existing REChain platform, backed
+by:
+  - POST /api/ai/chat          non-streaming JSON reply
+  - POST /api/ai/chat/stream   Server-Sent Events variant of the same turn
+  - GET  frontend route /ai-chat (frontend/src/pages/AiChatPage.tsx)
+
+Users can ask natural-language questions ("find me a 3-bedroom flat in
+Bangalore under 50 lakh"), get back a conversational reply, and — when the
+message reads as a property search — a set of live property cards pulled
+from the actual database and rendered inline in the chat.
+
+
+AI API CHOICE
+----------------
+GitHub Models (gpt-4.1-mini as primary, gpt-4.1-nano as fallback), accessed
+through the Azure AI Inference SDK (@azure-rest/ai-inference). This was
+chosen over adding a new provider because:
+  - It's what the platform's existing AI Property Hub already uses
+    (services/aiService.js), so the chat feature could reuse the same
+    AIService class, the same circuit-breaker/timeout/retry plumbing, and
+    the same "bring your own key" security model instead of introducing a
+    second AI SDK and a second way of handling credentials.
+  - It's free with any GitHub account, which matches the assessment's goal
+    of something a reviewer can actually run without paying for API access.
+  - GPT-4.1-mini/nano are fast and cheap enough for a chat UI where the user
+    is watching tokens stream in real time.
+
+Consistent with the rest of the platform, there is no server-side API key
+fallback. Every request must carry the user's own key as an X-Github-Key
+header (validated in resolveServices()); the server-side env var
+GITHUB_MODELS_API_KEY exists only as a placeholder for local scripts, never
+as a runtime fallback. This keeps the cost and security model identical to
+the existing AI Hub — no shared server key that could be exhausted or
+abused by every visitor.
+
+
+PROMPT ENGINEERING STRATEGY
+----------------
+1. System prompt (CHAT_SYSTEM_PROMPT in services/aiService.js) sets the
+   assistant's persona and hard rules up front: reply conversationally
+   (markdown is fine, since the frontend renders it with react-markdown),
+   quote prices in INR Lakhs/Crores, stay concise, ask a clarifying
+   question instead of guessing, and — the most important rule for
+   trustworthiness — never invent specific listings, prices or
+   availability that weren't explicitly provided in context.
+
+2. Grounding via a second system message, injected only when relevant:
+   when the user's message looks like a property search, the backend
+   queries MongoDB directly for matching listings *before* calling the AI,
+   and hands the AI a compact, structured summary of exactly those
+   listings ("These listings were just looked up from the live database
+   for this message - use ONLY these when recommending properties, do not
+   invent others"). This turns the model into a summarizer/explainer of
+   real data instead of a source of hallucinated listings, which is the
+   single biggest reliability risk for this kind of feature.
+
+3. Conversation history: the last 20 turns from the client are trimmed and
+   appended as alternating user/assistant messages, so follow-ups like
+   "tell me about the first one" resolve correctly without re-sending the
+   whole conversation's context note every time.
+
+4. Generation settings: temperature 0.4 (favors consistent, factual answers
+   over creative variation — appropriate for a real-estate assistant) and
+   max_tokens 800 (keeps replies to a few short paragraphs/a short list,
+   per the system prompt's own instruction, and bounds latency + cost).
+
+
+INTENT DETECTION
+----------------
+Deliberately rule-based (utils/detectChatIntent.js), not a second AI call:
+a set of regexes look for search verbs + property nouns, bedroom counts
+("3 BHK", "2 bedrooms"), price ceilings ("under 50 lakh", "below $500,000",
+with lakh/crore/k unit parsing), and location phrases ("in Bangalore").
+A concrete structural filter (beds/price/type) alone is treated as a strong
+enough signal; a bare location match is not (needs a search verb + property
+noun too, so "what's the weather in Mumbai?" doesn't trigger a listings
+search).
+
+This only decides *whether* to run a database lookup — the AI still writes
+every reply. The trade-off is intentional: it's instant, free, and trivial
+to demo/explain on camera, at the cost of only handling English phrasing
+patterns rather than open-ended natural language understanding. A message
+that expresses search intent in an unrecognized way (e.g. a very indirect
+phrasing) falls back to a plain conversational reply with no property
+cards — a safe failure mode, not a broken one.
+
+
+STREAMING
+----------------
+True token-by-token streaming via Server-Sent Events, not a polling or fake
+"progressive reveal" - services/aiService.js's chatStream() consumes the
+Azure SDK's raw Node stream directly, and propertyController.js's
+chatWithAIStream() re-emits three named SSE events: `meta` (intent +
+matched property cards, sent once up front so the UI can render cards
+immediately rather than waiting for the reply to finish), `delta` (one per
+token chunk), and `done`/`error`.
+
+On the frontend, EventSource wasn't an option because it can't send a
+custom Authorization/API-key header or a POST body, so the client instead
+uses a plain fetch() call and manually parses the SSE frame format
+(buffering on "\n\n", pulling out event:/data: lines) - implemented once in
+services/api.ts's aiAPI.chatStream() as an async generator that
+AiChatPage.tsx consumes with a simple for-await loop.
+
+
+KEY DECISIONS
+----------------
+- Validation & sanitization (utils/validateChatRequest.js): message capped
+  at 2000 chars, history capped at the last 20 items / 4000 chars each,
+  only known-safe context keys (city, locality, propertyId, filters) are
+  forwarded to the AI - everything else in the request body's context
+  object is silently dropped rather than passed through blind. Control
+  characters are stripped but text is not HTML-escaped, since it's sent to
+  the LLM and rendered as markdown on the frontend, never injected into
+  backend HTML.
+- Resilience: the existing circuit breaker + per-model timeout + automatic
+  gpt-4.1-mini -> gpt-4.1-nano fallback (already built for the AI Hub) is
+  reused as-is for chat, so a slow/unavailable primary model degrades to a
+  faster fallback instead of hanging the whole request.
+- The property lookup that backs "search intent" turns uses
+  .maxTimeMS(5000) and is wrapped in its own try/catch, separate from the
+  AI call's error handling: a slow or unreachable database can only ever
+  degrade a chat turn to a plain reply with no cards attached, never hang
+  or fail the whole request.
+- Rate limiting: chat routes sit behind their own limiter (chatLimiter),
+  sharing the same distributed, file-backed limiter implementation as the
+  rest of the AI endpoints, so chat traffic doesn't starve or get starved
+  by the AI Hub's search traffic.
+- classifyAIChatError() maps provider-specific failure shapes (401/403 auth,
+  402 credits exhausted, 429 rate-limited, timeout, circuit-open) to
+  distinct, user-facing error codes instead of one generic 500/502, so the
+  frontend can show "your key looks invalid" vs. "you're out of credits" vs.
+  "try again in a moment" as different messages.
+
+
+TRADE-OFFS / WHAT I'D DO WITH MORE TIME
+----------------
+- Intent detection is regex-based and English-only; a small classifier or
+  a cheap dedicated AI call would generalize much better to indirect or
+  multilingual phrasing, at the cost of latency and an extra API call on
+  every turn.
+- Property matching is a direct Mongo query on parsed structural filters
+  (beds/price/type/location), not semantic/vector search - "somewhere quiet
+  near good schools" won't match anything today. Embeddings-based retrieval
+  over listing descriptions would handle that but adds real infrastructure
+  (an embedding pipeline + a vector index) beyond this assessment's scope.
+- Chat history lives only in frontend component state - refreshing the page
+  loses the conversation. Persisting it (localStorage at minimum, a
+  Conversation model in Mongo for logged-in users ideally) was cut to stay
+  inside the time box.
+- max_tokens 800 keeps replies concise and demo-friendly but will visibly
+  truncate a genuinely long, detailed answer (e.g. "compare these 5
+  properties in depth") - a follow-up "tell me more" is the workaround
+  today rather than a larger budget.
