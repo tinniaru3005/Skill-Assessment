@@ -17,6 +17,19 @@ Rules:
 - Keep analysis factual and data-driven — no speculation.
 - Never include markdown, code fences, or extra text outside the JSON.`;
 
+const CHAT_SYSTEM_PROMPT = `You are a friendly, knowledgeable real estate assistant for this platform.
+Rules:
+- Help users search for properties, understand listings, and get market insights.
+- Reply in plain conversational text (markdown formatting like **bold**, bullet lists, and headings is fine).
+- Use INR currency (Lakhs/Crores) when discussing prices.
+- Be concise: prefer a few short paragraphs or a short list over long essays.
+- If you don't have enough information to answer precisely, say so and ask a clarifying question rather than guessing.
+- Never fabricate specific property listings, prices, or availability that were not provided to you in context.`;
+
+// Max number of prior turns (user+assistant messages) kept when building
+// the chat completion request, to bound token usage and cost per request.
+const MAX_HISTORY_TURNS = 20;
+
 class AIService {
   constructor(apiKey) {
     if (!apiKey) {
@@ -330,6 +343,111 @@ Respond ONLY with this JSON schema:
 }`;
 
     return this.generateText(prompt);
+  }
+
+  // ── Chat (conversational assistant) ───────────────────────────
+
+  /**
+   * Turn a free-form context object into a short system note the model
+   * can use. Only whitelisted keys reach this point (see validateChatRequest).
+   */
+  _formatContextNote(context = {}) {
+    const parts = [];
+    if (context.city) parts.push(`City: ${context.city}`);
+    if (context.locality) parts.push(`Locality: ${context.locality}`);
+    if (context.propertyId) parts.push(`User is currently viewing property ID: ${context.propertyId}`);
+    if (context.filters) parts.push(`Active search filters: ${JSON.stringify(context.filters)}`);
+    return parts.length ? `Additional context for this conversation:\n${parts.join('\n')}` : '';
+  }
+
+  /**
+   * Build the messages array for a chat completion: system prompt,
+   * optional context note, trimmed history, then the new user message.
+   */
+  _buildChatMessages(message, history = [], context = {}) {
+    const messages = [{ role: 'system', content: CHAT_SYSTEM_PROMPT }];
+
+    const contextNote = this._formatContextNote(context);
+    if (contextNote) {
+      messages.push({ role: 'system', content: contextNote });
+    }
+
+    const trimmedHistory = history.slice(-MAX_HISTORY_TURNS);
+    for (const turn of trimmedHistory) {
+      messages.push({ role: turn.role, content: turn.content });
+    }
+
+    messages.push({ role: 'user', content: message });
+    return messages;
+  }
+
+  /**
+   * Multi-turn chat completion with the same primary/fallback + circuit
+   * breaker protection as generateText(), but supporting a full message
+   * history instead of a single prompt.
+   */
+  async chat(message, history = [], context = {}) {
+    const messages = this._buildChatMessages(message, history, context);
+
+    try {
+      const result = await this.primaryCircuit.execute(async () => {
+        return await this._callChatModel(PRIMARY_MODEL, messages);
+      });
+      if (result) return result;
+    } catch (error) {
+      logger.warn('Primary circuit breaker triggered (chat)', { model: PRIMARY_MODEL, error: error.message });
+    }
+
+    logger.warn('Falling back to secondary model (chat)', { from: PRIMARY_MODEL, to: FALLBACK_MODEL });
+    const fallbackResult = await this.fallbackCircuit.execute(async () => {
+      return await this._callChatModel(FALLBACK_MODEL, messages);
+    });
+    return fallbackResult;
+  }
+
+  async _callChatModel(model, messages) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+      logger.warn('AI chat model request timeout', { model, timeoutMs: AI_TIMEOUT_MS });
+    }, AI_TIMEOUT_MS);
+
+    try {
+      logger.info('Calling AI chat model', { model, messageCount: messages.length });
+      const startTime = Date.now();
+
+      const response = await this.client.path('/chat/completions').post({
+        body: {
+          messages,
+          model,
+          temperature: 0.4,
+          max_tokens: 800,
+          top_p: 1
+        },
+        ...(controller.signal ? { signal: controller.signal } : {}),
+      });
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+      logger.info('AI chat model responded', { model, elapsedSeconds: elapsed });
+
+      if (isUnexpected(response)) {
+        const errorMsg = response.body.error?.message || 'Unknown AI API error';
+        logger.error('AI chat model error', { model, error: errorMsg });
+        throw new Error(`AI API error: ${errorMsg}`);
+      }
+
+      return response.body.choices[0].message.content;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        logger.error('AI chat model request aborted', { model, reason: 'timeout' });
+        throw new Error(`AI request timeout after ${AI_TIMEOUT_MS / 1000}s`);
+      } else {
+        logger.error('AI chat model exception', { model, error: error.message });
+        throw error;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 

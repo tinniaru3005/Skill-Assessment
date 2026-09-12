@@ -2,6 +2,7 @@ import fs from 'fs';
 import { createFirecrawlService } from '../services/firecrawlService.js';
 import { createAIService } from '../services/aiService.js';
 import { validateAndFixPropertyAnalysis, validateAndFixLocationAnalysis } from '../utils/validateAIResponse.js';
+import { validateChatRequest } from '../utils/validateChatRequest.js';
 import imagekit from '../config/imagekit.js';
 import Property from '../models/propertyModel.js';
 import SearchCache from '../models/searchCacheModel.js';
@@ -658,5 +659,54 @@ export const deleteUserListing = async (req, res) => {
     } catch (error) {
         logger.error("Error deleting user listing", { error: error.message, stack: error.stack });
         res.status(500).json({ success: false, message: 'Failed to delete listing', error: error.message });
+    }
+};
+
+/**
+ * POST /api/ai/chat
+ * Conversational AI assistant. Accepts { message, history, context } and
+ * returns a single assistant reply. Non-streaming (see the streaming PR
+ * for the SSE variant) - shares the AI rate-limit budget via the aiLimiter
+ * middleware applied on the route.
+ */
+export const chatWithAI = async (req, res) => {
+    const validation = validateChatRequest(req.body);
+    if (!validation.valid) {
+        return res.status(400).json({
+            success: false,
+            message: validation.error,
+            error: 'INVALID_REQUEST',
+        });
+    }
+
+    const { message, history, context } = validation.data;
+
+    let services;
+    try {
+        services = resolveServices(req);
+    } catch (keyErr) {
+        return res.status(keyErr.statusCode || 403).json({
+            success: false,
+            message: keyErr.message,
+            error: keyErr.code || 'KEYS_REQUIRED',
+        });
+    }
+
+    const { aiService } = services;
+
+    try {
+        const reply = await aiService.chat(message, history, context);
+        res.json({
+            success: true,
+            reply,
+            timestamp: new Date().toISOString(),
+        });
+    } catch (error) {
+        logger.error('AI chat failed', { error: error.message });
+        res.status(502).json({
+            success: false,
+            message: 'AI chat service is temporarily unavailable. Please try again shortly.',
+            error: 'AI_CHAT_FAILED',
+        });
     }
 };

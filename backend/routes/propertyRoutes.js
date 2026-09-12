@@ -1,6 +1,6 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { searchProperties, getLocationTrends, createUserListing, getUserListings, updateUserListing, deleteUserListing, validateApiKeys, getCacheStats } from '../controller/propertyController.js';
+import { searchProperties, getLocationTrends, createUserListing, getUserListings, updateUserListing, deleteUserListing, validateApiKeys, getCacheStats, chatWithAI } from '../controller/propertyController.js';
 import { transformAISearchRequest } from '../middleware/transformRequest.js';
 import { protect } from '../middleware/authMiddleware.js';
 import upload from '../middleware/multer.js';
@@ -37,6 +37,9 @@ router.post('/ai/search', aiLimiter, transformAISearchRequest, searchProperties)
 
 // Validate user-provided API keys before save/use
 router.post('/ai/validate-keys', validateApiKeys);
+
+// AI chat assistant - shares the AI rate-limit budget with search
+router.post('/ai/chat', aiLimiter, chatWithAI);
 
 // Location trends — same rate limit (shares the 10/hr budget)
 router.get('/locations/:city/trends', aiLimiter, getLocationTrends);
