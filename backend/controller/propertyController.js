@@ -735,14 +735,22 @@ function summarizePropertiesForAI(properties) {
  * (see the streaming PR for the SSE variant) - shares the AI rate-limit
  * budget via the aiLimiter middleware applied on the route.
  */
-export const chatWithAI = async (req, res) => {
+/**
+ * Shared setup for both the non-streaming and streaming chat handlers:
+ * validates the request, gates on API keys, runs intent detection, and
+ * looks up matching properties. Returns either { error: { status, body } }
+ * (write it straight to res.status(status).json(body) and stop) or
+ * { data: { aiService, message, history, chatContext, intent, matchedProperties } }.
+ */
+async function prepareChatTurn(req) {
     const validation = validateChatRequest(req.body);
     if (!validation.valid) {
-        return res.status(400).json({
-            success: false,
-            message: validation.error,
-            error: 'INVALID_REQUEST',
-        });
+        return {
+            error: {
+                status: 400,
+                body: { success: false, message: validation.error, error: 'INVALID_REQUEST' },
+            },
+        };
     }
 
     const { message, history, context } = validation.data;
@@ -751,14 +759,13 @@ export const chatWithAI = async (req, res) => {
     try {
         services = resolveServices(req);
     } catch (keyErr) {
-        return res.status(keyErr.statusCode || 403).json({
-            success: false,
-            message: keyErr.message,
-            error: keyErr.code || 'KEYS_REQUIRED',
-        });
+        return {
+            error: {
+                status: keyErr.statusCode || 403,
+                body: { success: false, message: keyErr.message, error: keyErr.code || 'KEYS_REQUIRED' },
+            },
+        };
     }
-
-    const { aiService } = services;
 
     // ── Intent detection ──────────────────────────────────────────────────
     // Rule-based, not an extra AI call: instant, free, and easy to explain
@@ -783,6 +790,20 @@ export const chatWithAI = async (req, res) => {
         chatContext.matchedProperties = summarizePropertiesForAI(matchedProperties);
     }
 
+    return {
+        data: { aiService: services.aiService, message, history, chatContext, intent, matchedProperties },
+    };
+}
+
+/** POST /api/ai/chat - non-streaming: one JSON reply per request. */
+export const chatWithAI = async (req, res) => {
+    const prepared = await prepareChatTurn(req);
+    if (prepared.error) {
+        return res.status(prepared.error.status).json(prepared.error.body);
+    }
+
+    const { aiService, message, history, chatContext, intent, matchedProperties } = prepared.data;
+
     try {
         const reply = await aiService.chat(message, history, chatContext);
         res.json({
@@ -799,5 +820,63 @@ export const chatWithAI = async (req, res) => {
             message: 'AI chat service is temporarily unavailable. Please try again shortly.',
             error: 'AI_CHAT_FAILED',
         });
+    }
+};
+
+/**
+ * POST /api/ai/chat/stream - Server-Sent Events variant of the same turn.
+ * Emits:
+ *   event: meta   -> { intent, properties }          (sent once, up front)
+ *   event: delta  -> { content }                      (one per token chunk)
+ *   event: done   -> {}                                (stream finished cleanly)
+ *   event: error  -> { message, error }                (AI failed - stream ends)
+ */
+export const chatWithAIStream = async (req, res) => {
+    const prepared = await prepareChatTurn(req);
+    if (prepared.error) {
+        return res.status(prepared.error.status).json(prepared.error.body);
+    }
+
+    const { aiService, message, history, chatContext, intent, matchedProperties } = prepared.data;
+
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no', // disable proxy buffering (e.g. nginx) so chunks flush immediately
+    });
+    res.flushHeaders?.();
+
+    let clientDisconnected = false;
+    req.on('close', () => {
+        clientDisconnected = true;
+    });
+
+    const send = (event, data) => {
+        if (clientDisconnected) return;
+        try {
+            res.write(`event: ${event}\n`);
+            res.write(`data: ${JSON.stringify(data)}\n\n`);
+        } catch (writeErr) {
+            // Response already closed on the client side - nothing to do.
+        }
+    };
+
+    send('meta', { intent, properties: matchedProperties.map(toChatPropertyCard) });
+
+    try {
+        for await (const delta of aiService.chatStream(message, history, chatContext)) {
+            if (clientDisconnected) break;
+            send('delta', { content: delta });
+        }
+        if (!clientDisconnected) send('done', {});
+    } catch (error) {
+        logger.error('AI chat stream failed', { error: error.message });
+        send('error', {
+            message: 'AI chat service is temporarily unavailable. Please try again shortly.',
+            error: 'AI_CHAT_FAILED',
+        });
+    } finally {
+        res.end();
     }
 };
