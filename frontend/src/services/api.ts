@@ -162,6 +162,23 @@ export const aiAPI = {
       },
     });
   },
+
+  // AI Chat Assistant
+  // Backend: POST /api/ai/chat -> { success, reply, intent, properties, timestamp }
+  chat: (data: {
+    message: string;
+    history?: { role: 'user' | 'assistant'; content: string }[];
+    context?: Record<string, unknown>;
+  }) => {
+    const githubKey    = localStorage.getItem('REChain_github_key');
+    const firecrawlKey = localStorage.getItem('REChain_firecrawl_key');
+    return apiClient.post('/ai/chat', data, {
+      headers: {
+        ...(githubKey    && { 'X-Github-Key':    githubKey }),
+        ...(firecrawlKey && { 'X-Firecrawl-Key': firecrawlKey }),
+      },
+    });
+  },
 };
 
 // Helpers to read/write user API keys in localStorage
