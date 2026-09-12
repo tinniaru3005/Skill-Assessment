@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Send, Key } from 'lucide-react';
 import Navbar from '../components/common/Navbar';
 import Footer from '../components/common/Footer';
@@ -11,6 +11,8 @@ type ChatRole = 'user' | 'assistant' | 'system';
 interface ChatMessage {
   role: ChatRole;
   content: string;
+  /** Only set on a "system" (error) message - the user text that failed, so it can be retried. */
+  retryText?: string;
 }
 
 const WELCOME_MESSAGE: ChatMessage = {
@@ -61,8 +63,17 @@ const AiChatPage: React.FC = () => {
   const [keysReady, setKeysReady] = useState(apiKeyStorage.hasKeys());
   const [showKeyModal, setShowKeyModal] = useState(false);
 
-  const sendMessage = async () => {
-    const trimmed = input.trim();
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to the latest message (or the typing indicator) any time the
+  // conversation changes - covers a new message, an error bubble, and the
+  // typing indicator appearing/disappearing.
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, sending]);
+
+  const sendMessage = async (overrideText?: string) => {
+    const trimmed = (overrideText ?? input).trim();
     if (!trimmed || sending) return;
 
     // History sent to the backend excludes any local-only system messages
@@ -72,7 +83,7 @@ const AiChatPage: React.FC = () => {
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
 
     setMessages((prev) => [...prev, { role: 'user', content: trimmed }]);
-    setInput('');
+    if (!overrideText) setInput('');
     setSending(true);
 
     try {
@@ -81,7 +92,7 @@ const AiChatPage: React.FC = () => {
       setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
     } catch (err: any) {
       const { message, isKeyError } = describeChatError(err);
-      setMessages((prev) => [...prev, { role: 'system', content: message }]);
+      setMessages((prev) => [...prev, { role: 'system', content: message, retryText: trimmed }]);
       if (isKeyError) setShowKeyModal(true);
     } finally {
       setSending(false);
@@ -130,8 +141,15 @@ const AiChatPage: React.FC = () => {
           {/* Message list */}
           <div className="flex-1 overflow-y-auto rounded-xl border border-gray-200 bg-gray-50/60 p-4 space-y-3">
             {messages.map((m, i) => (
-              <ChatBubble key={i} role={m.role} content={m.content} />
+              <ChatBubble
+                key={i}
+                role={m.role}
+                content={m.content}
+                onRetry={m.retryText ? () => sendMessage(m.retryText) : undefined}
+              />
             ))}
+            {sending && <TypingIndicator />}
+            <div ref={messagesEndRef} />
           </div>
 
           {/* Input row */}
@@ -168,13 +186,33 @@ const AiChatPage: React.FC = () => {
   );
 };
 
-const ChatBubble: React.FC<{ role: ChatRole; content: string }> = ({ role, content }) => {
+/** Three-dot "AI is thinking" bubble, shown while a reply is in flight. */
+const TypingIndicator: React.FC = () => (
+  <div className="flex justify-start">
+    <div className="flex items-center gap-1.5 rounded-2xl rounded-bl-sm border border-gray-200 bg-white px-4 py-3">
+      <span className="size-1.5 animate-bounce rounded-full bg-gray-400 [animation-delay:-0.3s]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-gray-400 [animation-delay:-0.15s]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-gray-400" />
+    </div>
+  </div>
+);
+
+const ChatBubble: React.FC<{ role: ChatRole; content: string; onRetry?: () => void }> = ({ role, content, onRetry }) => {
   if (role === 'system') {
     return (
-      <div className="text-center">
+      <div className="flex flex-col items-center gap-1.5">
         <span className="inline-block rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs text-red-600">
           {content}
         </span>
+        {onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="text-xs font-medium text-primary underline-offset-2 hover:underline"
+          >
+            Try again
+          </button>
+        )}
       </div>
     );
   }
