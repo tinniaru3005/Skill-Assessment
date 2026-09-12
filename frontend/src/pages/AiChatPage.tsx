@@ -39,6 +39,14 @@ const WELCOME_MESSAGE: ChatMessage = {
   content: "Hi! I'm your AI real estate assistant. Ask me to find a property, or ask any question about the market.",
 };
 
+/** Starter prompts shown before the user has sent their first message, to help them get going. */
+const SUGGESTED_PROMPTS = [
+  'Find me a 2-bedroom apartment under $2,000/month',
+  "What's a fair price for a 3-bed house in this area?",
+  'Show me properties currently for sale',
+  'What should I know before renting my first apartment?',
+];
+
 /**
  * Turn an axios error from POST /api/ai/chat into a short, user-facing
  * message, and flag whether it's a missing/invalid API key error (in which
@@ -169,6 +177,9 @@ const AiChatPage: React.FC = () => {
                 onRetry={m.retryText ? () => sendMessage(m.retryText) : undefined}
               />
             ))}
+            {messages.length === 1 && !sending && (
+              <QuickSuggestions onSelect={(text) => sendMessage(text)} />
+            )}
             {sending && <TypingIndicator />}
             <div ref={messagesEndRef} />
           </div>
@@ -206,6 +217,22 @@ const AiChatPage: React.FC = () => {
     </div>
   );
 };
+
+/** Row of clickable starter prompts, shown before the user sends their first message. */
+const QuickSuggestions: React.FC<{ onSelect: (text: string) => void }> = ({ onSelect }) => (
+  <div className="flex flex-wrap gap-2 pl-1">
+    {SUGGESTED_PROMPTS.map((prompt) => (
+      <button
+        key={prompt}
+        type="button"
+        onClick={() => onSelect(prompt)}
+        className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 transition-colors hover:border-primary hover:text-primary"
+      >
+        {prompt}
+      </button>
+    ))}
+  </div>
+);
 
 /** Three-dot "AI is thinking" bubble, shown while a reply is in flight. */
 const TypingIndicator: React.FC = () => (
