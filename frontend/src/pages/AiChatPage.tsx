@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Key } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Send, Key, MapPin, BedDouble, Bath, Ruler } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import Navbar from '../components/common/Navbar';
@@ -10,11 +11,27 @@ import AIApiKeyModal from '../components/ai-hub/AIApiKeyModal';
 
 type ChatRole = 'user' | 'assistant' | 'system';
 
+/** Compact property listing attached to an assistant reply - mirrors the backend's toChatPropertyCard(). */
+interface ChatPropertyCard {
+  id: string;
+  title: string;
+  location: string;
+  price: number;
+  beds: number;
+  baths: number;
+  sqm: number;
+  type: string;
+  availability: string;
+  image?: string;
+}
+
 interface ChatMessage {
   role: ChatRole;
   content: string;
   /** Only set on a "system" (error) message - the user text that failed, so it can be retried. */
   retryText?: string;
+  /** Matching listings for an assistant reply to a property-search turn, if any. */
+  properties?: ChatPropertyCard[];
 }
 
 const WELCOME_MESSAGE: ChatMessage = {
@@ -91,7 +108,8 @@ const AiChatPage: React.FC = () => {
     try {
       const response = await aiAPI.chat({ message: trimmed, history });
       const reply: string = response.data?.reply || "Sorry, I didn't get a response there. Please try again.";
-      setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+      const properties: ChatPropertyCard[] | undefined = response.data?.properties;
+      setMessages((prev) => [...prev, { role: 'assistant', content: reply, properties }]);
     } catch (err: any) {
       const { message, isKeyError } = describeChatError(err);
       setMessages((prev) => [...prev, { role: 'system', content: message, retryText: trimmed }]);
@@ -147,6 +165,7 @@ const AiChatPage: React.FC = () => {
                 key={i}
                 role={m.role}
                 content={m.content}
+                properties={m.properties}
                 onRetry={m.retryText ? () => sendMessage(m.retryText) : undefined}
               />
             ))}
@@ -199,7 +218,12 @@ const TypingIndicator: React.FC = () => (
   </div>
 );
 
-const ChatBubble: React.FC<{ role: ChatRole; content: string; onRetry?: () => void }> = ({ role, content, onRetry }) => {
+const ChatBubble: React.FC<{
+  role: ChatRole;
+  content: string;
+  properties?: ChatPropertyCard[];
+  onRetry?: () => void;
+}> = ({ role, content, properties, onRetry }) => {
   if (role === 'system') {
     return (
       <div className="flex flex-col items-center gap-1.5">
@@ -221,7 +245,7 @@ const ChatBubble: React.FC<{ role: ChatRole; content: string; onRetry?: () => vo
 
   const isUser = role === 'user';
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
       <div
         className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm ${
           isUser
@@ -231,9 +255,61 @@ const ChatBubble: React.FC<{ role: ChatRole; content: string; onRetry?: () => vo
       >
         {isUser ? content : <MarkdownContent content={content} />}
       </div>
+      {!isUser && properties && properties.length > 0 && <PropertyResultCards properties={properties} />}
     </div>
   );
 };
+
+/** Horizontally-scrollable row of matching listings, shown under an assistant reply. */
+const PropertyResultCards: React.FC<{ properties: ChatPropertyCard[] }> = ({ properties }) => (
+  <div className="mt-2 flex max-w-[80%] gap-3 overflow-x-auto pb-1">
+    {properties.map((property) => (
+      <PropertyResultCard key={property.id} property={property} />
+    ))}
+  </div>
+);
+
+/** Compact, chat-friendly property card - links out to the full listing page. */
+const PropertyResultCard: React.FC<{ property: ChatPropertyCard }> = ({ property }) => (
+  <Link
+    to={`/property/${property.id}`}
+    className="block w-[220px] shrink-0 overflow-hidden rounded-xl border border-gray-200 bg-white transition-shadow hover:shadow-md"
+  >
+    <div className="h-28 w-full bg-gray-100">
+      {property.image ? (
+        <img src={property.image} alt={property.title} className="h-full w-full object-cover" />
+      ) : (
+        <div className="flex h-full items-center justify-center text-gray-300">
+          <MapPin className="size-6" />
+        </div>
+      )}
+    </div>
+    <div className="p-3">
+      <p className="truncate text-sm font-semibold text-gray-900">{property.title}</p>
+      <p className="mt-0.5 flex items-center gap-1 truncate text-xs text-gray-500">
+        <MapPin className="size-3 shrink-0" />
+        {property.location}
+      </p>
+      <p className="mt-1.5 text-sm font-bold text-primary">
+        ${Number(property.price || 0).toLocaleString()}
+      </p>
+      <div className="mt-1.5 flex items-center gap-2.5 text-[11px] text-gray-500">
+        <span className="flex items-center gap-0.5">
+          <BedDouble className="size-3" />
+          {property.beds}
+        </span>
+        <span className="flex items-center gap-0.5">
+          <Bath className="size-3" />
+          {property.baths}
+        </span>
+        <span className="flex items-center gap-0.5">
+          <Ruler className="size-3" />
+          {property.sqm}
+        </span>
+      </div>
+    </div>
+  </Link>
+);
 
 /**
  * Renders an assistant reply as Markdown - bold/italic text, bullet and
