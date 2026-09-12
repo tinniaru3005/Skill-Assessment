@@ -143,6 +143,8 @@ backend/skills-lock.json
 # Rate limiter temporary storage
 .rate-limit-store/
 backend/.rate-limit-store/
+.rate-limit-store-chat/
+backend/.rate-limit-store-chat/
 
 # Docker
 .dockerignore
