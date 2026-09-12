@@ -1,7 +1,10 @@
 import axios from 'axios';
 
 // API Base URL - uses env variable or falls back to localhost
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
+// Exported (not just used internally) because the streaming chat helper
+// below talks to the backend via fetch() directly, rather than through the
+// shared axios instance, so it needs the same base URL.
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
   ? `${import.meta.env.VITE_API_BASE_URL}/api`
   : 'http://localhost:4000/api';
 
@@ -178,6 +181,89 @@ export const aiAPI = {
         ...(firecrawlKey && { 'X-Firecrawl-Key': firecrawlKey }),
       },
     });
+  },
+
+  // AI Chat Assistant - streaming (SSE) variant.
+  // Backend: POST /api/ai/chat/stream, emitting named SSE events:
+  //   meta  -> { intent, properties }   (once, up front)
+  //   delta -> { content }               (one per token chunk)
+  //   done  -> {}                        (stream finished cleanly)
+  //   error -> { message, error }        (AI failed - stream ends)
+  //
+  // Uses fetch() directly rather than the axios instance above: reading a
+  // streamed response body needs a real ReadableStream reader, and the
+  // request needs the same X-Github-Key/X-Firecrawl-Key headers as chat()
+  // above, which rules out the browser's native EventSource (GET-only, no
+  // custom headers, no request body).
+  chatStream: async function* (data: {
+    message: string;
+    history?: { role: 'user' | 'assistant'; content: string }[];
+    context?: Record<string, unknown>;
+  }): AsyncGenerator<{ event: 'meta' | 'delta' | 'done' | 'error'; data: any }> {
+    const githubKey    = localStorage.getItem('REChain_github_key');
+    const firecrawlKey = localStorage.getItem('REChain_firecrawl_key');
+
+    const response = await fetch(`${API_BASE_URL}/ai/chat/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(githubKey    && { 'X-Github-Key':    githubKey }),
+        ...(firecrawlKey && { 'X-Firecrawl-Key': firecrawlKey }),
+      },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok || !response.body) {
+      // The request was rejected before streaming even started (e.g. missing
+      // keys, invalid body, rate limit) - the backend still replies with a
+      // normal JSON error in that case. Shape the thrown error like an axios
+      // error so the existing describeChatError() can classify it the same
+      // way it does for the non-streaming call.
+      let body: any = {};
+      try {
+        body = await response.json();
+      } catch {
+        // Non-JSON error body (e.g. a proxy/server error page) - fall through
+        // with an empty body; describeChatError() falls back to a generic message.
+      }
+      const err: any = new Error(body?.message || `Chat stream request failed (${response.status})`);
+      err.response = { status: response.status, data: body };
+      throw err;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line. A frame can arrive split
+      // across multiple reads, so only consume complete frames and keep
+      // whatever's left in the buffer for the next chunk.
+      let boundary;
+      while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        if (!frame.trim()) continue;
+
+        let eventName = 'message';
+        let dataLine = '';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) eventName = line.slice(6).trim();
+          else if (line.startsWith('data:')) dataLine += line.slice(5).trim();
+        }
+        if (!dataLine) continue;
+
+        try {
+          yield { event: eventName as 'meta' | 'delta' | 'done' | 'error', data: JSON.parse(dataLine) };
+        } catch {
+          // Malformed frame - skip it rather than breaking the whole stream.
+        }
+      }
+    }
   },
 };
 
