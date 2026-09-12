@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Key } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import Navbar from '../components/common/Navbar';
 import Footer from '../components/common/Footer';
 import { useSEO } from '../hooks/useSEO';
@@ -221,16 +223,102 @@ const ChatBubble: React.FC<{ role: ChatRole; content: string; onRetry?: () => vo
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm ${
+        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm ${
           isUser
-            ? 'rounded-br-sm bg-primary text-white'
+            ? 'rounded-br-sm whitespace-pre-wrap bg-primary text-white'
             : 'rounded-bl-sm border border-gray-200 bg-white text-gray-800'
         }`}
       >
-        {content}
+        {isUser ? content : <MarkdownContent content={content} />}
       </div>
     </div>
   );
 };
+
+/**
+ * Renders an assistant reply as Markdown - bold/italic text, bullet and
+ * numbered lists, links, inline/fenced code, blockquotes, and GFM tables -
+ * using the site's own text styles rather than a Tailwind typography plugin
+ * (not installed in this project). User and system messages are left as
+ * plain text, since only AI-generated replies are expected to use Markdown.
+ */
+const MarkdownContent: React.FC<{ content: string }> = ({ content }) => (
+  <div className="space-y-2 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }: { children?: React.ReactNode }) => <p className="mb-2 last:mb-0">{children}</p>,
+        strong: ({ children }: { children?: React.ReactNode }) => (
+          <strong className="font-semibold text-gray-900">{children}</strong>
+        ),
+        em: ({ children }: { children?: React.ReactNode }) => <em className="italic">{children}</em>,
+        ul: ({ children }: { children?: React.ReactNode }) => (
+          <ul className="mb-2 ml-4 list-disc space-y-1 last:mb-0">{children}</ul>
+        ),
+        ol: ({ children }: { children?: React.ReactNode }) => (
+          <ol className="mb-2 ml-4 list-decimal space-y-1 last:mb-0">{children}</ol>
+        ),
+        li: ({ children }: { children?: React.ReactNode }) => <li>{children}</li>,
+        a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-primary underline underline-offset-2 hover:text-primary/80"
+          >
+            {children}
+          </a>
+        ),
+        code: ({ className, children }: { className?: string; children?: React.ReactNode }) => {
+          const isBlock = /language-/.test(className || '');
+          if (isBlock) {
+            return (
+              <code className="block overflow-x-auto rounded-md bg-gray-900/90 px-3 py-2 text-xs text-gray-100">
+                {children}
+              </code>
+            );
+          }
+          return (
+            <code className="rounded bg-gray-100 px-1 py-0.5 text-[13px] text-gray-800">{children}</code>
+          );
+        },
+        pre: ({ children }: { children?: React.ReactNode }) => (
+          <pre className="mb-2 overflow-x-auto rounded-md last:mb-0">{children}</pre>
+        ),
+        blockquote: ({ children }: { children?: React.ReactNode }) => (
+          <blockquote className="mb-2 border-l-2 border-gray-300 pl-3 italic text-gray-600 last:mb-0">
+            {children}
+          </blockquote>
+        ),
+        h1: ({ children }: { children?: React.ReactNode }) => (
+          <h3 className="mb-1 text-base font-semibold text-gray-900">{children}</h3>
+        ),
+        h2: ({ children }: { children?: React.ReactNode }) => (
+          <h3 className="mb-1 text-base font-semibold text-gray-900">{children}</h3>
+        ),
+        h3: ({ children }: { children?: React.ReactNode }) => (
+          <h4 className="mb-1 text-sm font-semibold text-gray-900">{children}</h4>
+        ),
+        table: ({ children }: { children?: React.ReactNode }) => (
+          <div className="mb-2 overflow-x-auto last:mb-0">
+            <table className="w-full border-collapse text-xs">{children}</table>
+          </div>
+        ),
+        thead: ({ children }: { children?: React.ReactNode }) => (
+          <thead className="border-b border-gray-300">{children}</thead>
+        ),
+        th: ({ children }: { children?: React.ReactNode }) => (
+          <th className="px-2 py-1 text-left font-semibold text-gray-700">{children}</th>
+        ),
+        td: ({ children }: { children?: React.ReactNode }) => (
+          <td className="border-t border-gray-100 px-2 py-1">{children}</td>
+        ),
+        hr: () => <hr className="my-2 border-gray-200" />,
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  </div>
+);
 
 export default AiChatPage;
