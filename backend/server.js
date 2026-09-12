@@ -49,16 +49,14 @@ const limiter = rateLimit({
     // Skip for health checks and status endpoints
     if (req.path === '/status' || req.path === '/' || req.path.startsWith('/health')) return true;
     return process.env.NODE_ENV === 'development' && res.statusCode < 400;
-  },
-  // Custom key generator to handle proxy scenarios
-  keyGenerator: (req) => {
-    // Use X-Forwarded-For in production, fallback to IP
-    const forwarded = req.headers['x-forwarded-for'];
-    if (forwarded && process.env.NODE_ENV === 'production') {
-      return forwarded.split(',')[0].trim();
-    }
-    return req.ip;
   }
+  // NOTE: a previous custom keyGenerator here (returning req.ip / X-Forwarded-For)
+  // failed express-rate-limit v7's internal IPv4/IPv6 key validation. That validation
+  // error is thrown inside the store's async increment path, so it never reached any
+  // try/catch here -- it surfaced only as an unhandled rejection, which the global
+  // handler below only logs, so the request just hung forever with zero response.
+  // express-rate-limit's own default keyGenerator already handles trust-proxy/IP
+  // normalization correctly and passes validation, so we let it do the job instead.
 });
 
 // Security middlewares
