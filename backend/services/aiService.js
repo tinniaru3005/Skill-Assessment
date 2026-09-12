@@ -79,7 +79,7 @@ class AIService {
           max_tokens: 8,
           top_p: 1
         },
-        ...(controller.signal ? { signal: controller.signal } : {}),
+        ...(controller.signal ? { abortSignal: controller.signal } : {}),
       });
 
       if (isUnexpected(response)) {
@@ -148,7 +148,7 @@ class AIService {
           top_p: 1
         },
         // Pass abort signal if the SDK supports it
-        ...(controller.signal ? { signal: controller.signal } : {}),
+        ...(controller.signal ? { abortSignal: controller.signal } : {}),
       });
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -442,7 +442,7 @@ Respond ONLY with this JSON schema:
           max_tokens: 800,
           top_p: 1
         },
-        ...(controller.signal ? { signal: controller.signal } : {}),
+        ...(controller.signal ? { abortSignal: controller.signal } : {}),
       });
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -495,7 +495,7 @@ Respond ONLY with this JSON schema:
             top_p: 1,
             stream: true,
           },
-          ...(controller.signal ? { signal: controller.signal } : {}),
+          ...(controller.signal ? { abortSignal: controller.signal } : {}),
         })
         .asNodeStream();
 
