@@ -103,6 +103,80 @@ function isCreditsExhaustedError(err) {
     return code === 402 || msg.includes('402') || msg.includes('insufficient credits') || msg.includes('credits exhausted');
 }
 
+function isTimeoutError(err) {
+    const msg = String(err?.message || '').toLowerCase();
+    return err?.name === 'AbortError' || msg.includes('timeout');
+}
+
+function isRateLimitedError(err) {
+    const msg = String(err?.message || '').toLowerCase();
+    const code = err?.statusCode || err?.status || 0;
+    return code === 429 || msg.includes('429') || msg.includes('rate limit') || msg.includes('too many requests');
+}
+
+function isCircuitOpenError(err) {
+    return String(err?.message || '').includes('[CircuitBreaker:');
+}
+
+// GitHub Models returns 403 (not the more typical 401) for an invalid/
+// revoked personal access token, so the AI-specific auth check is broader
+// than the shared isUnauthorizedError() above (which is tuned for
+// Firecrawl's 401s and is left alone to avoid changing its behavior there).
+function isAIAuthError(err) {
+    const code = err?.statusCode || err?.status || 0;
+    return code === 401 || code === 403 || isUnauthorizedError(err);
+}
+
+/**
+ * Map an error thrown by aiService.chat()/chatStream() to a structured,
+ * user-facing status + body, instead of the single generic 502 used before.
+ * Shared by both the JSON and SSE chat handlers so the two stay consistent.
+ */
+function classifyAIChatError(error) {
+    if (isAIAuthError(error)) {
+        return {
+            status: 403,
+            body: {
+                success: false,
+                message: 'Your GitHub Models API key is invalid or expired. Please update it and try again.',
+                error: 'KEYS_INVALID',
+                provider: 'github-models',
+            },
+        };
+    }
+
+    if (isRateLimitedError(error) || isCircuitOpenError(error)) {
+        return {
+            status: 429,
+            body: {
+                success: false,
+                message: 'The AI provider is receiving too many requests right now. Please wait a moment and try again.',
+                error: 'AI_RATE_LIMITED',
+            },
+        };
+    }
+
+    if (isTimeoutError(error)) {
+        return {
+            status: 504,
+            body: {
+                success: false,
+                message: 'The AI took too long to respond. Please try again.',
+                error: 'AI_TIMEOUT',
+            },
+        };
+    }
+
+    return {
+        status: 502,
+        body: {
+            success: false,
+            message: 'AI chat service is temporarily unavailable. Please try again shortly.',
+            error: 'AI_CHAT_FAILED',
+        },
+    };
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 export const searchProperties = async (req, res) => {
@@ -814,12 +888,9 @@ export const chatWithAI = async (req, res) => {
             timestamp: new Date().toISOString(),
         });
     } catch (error) {
-        logger.error('AI chat failed', { error: error.message });
-        res.status(502).json({
-            success: false,
-            message: 'AI chat service is temporarily unavailable. Please try again shortly.',
-            error: 'AI_CHAT_FAILED',
-        });
+        const classified = classifyAIChatError(error);
+        logger.error('AI chat failed', { error: error.message, classifiedAs: classified.body.error, status: classified.status });
+        res.status(classified.status).json(classified.body);
     }
 };
 
@@ -871,11 +942,12 @@ export const chatWithAIStream = async (req, res) => {
         }
         if (!clientDisconnected) send('done', {});
     } catch (error) {
-        logger.error('AI chat stream failed', { error: error.message });
-        send('error', {
-            message: 'AI chat service is temporarily unavailable. Please try again shortly.',
-            error: 'AI_CHAT_FAILED',
-        });
+        const classified = classifyAIChatError(error);
+        logger.error('AI chat stream failed', { error: error.message, classifiedAs: classified.body.error, status: classified.status });
+        // The SSE response already committed to HTTP 200 when headers were
+        // sent - classified.status can't change that now, but the specific
+        // error code/message still travels in the event payload.
+        send('error', classified.body);
     } finally {
         res.end();
     }
