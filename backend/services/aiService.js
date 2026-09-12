@@ -3,6 +3,7 @@ import ModelClient, { isUnexpected } from "@azure-rest/ai-inference";
 import { AzureKeyCredential } from "@azure/core-auth";
 import { registry } from "../utils/circuitBreaker.js";
 import logger from "../utils/logger.js";
+import { createSseStream } from "@azure/core-sse";
 
 const PRIMARY_MODEL = "gpt-4.1-mini";
 const FALLBACK_MODEL = "gpt-4.1-nano";
@@ -457,6 +458,92 @@ Respond ONLY with this JSON schema:
       }
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Open a streaming chat completion connection to a given model and return
+   * the raw Node stream. Does not consume it - chatStream() does that.
+   */
+  async _openChatStream(model, messages) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+      logger.warn('AI chat stream open timeout', { model, timeoutMs: AI_TIMEOUT_MS });
+    }, AI_TIMEOUT_MS);
+
+    try {
+      logger.info('Opening AI chat stream', { model, messageCount: messages.length });
+
+      const response = await this.client
+        .path('/chat/completions')
+        .post({
+          body: {
+            messages,
+            model,
+            temperature: 0.4,
+            max_tokens: 800,
+            top_p: 1,
+            stream: true,
+          },
+          ...(controller.signal ? { signal: controller.signal } : {}),
+        })
+        .asNodeStream();
+
+      if (response.status !== '200') {
+        throw new Error(`AI API error (stream): unexpected status ${response.status}`);
+      }
+      if (!response.body) {
+        throw new Error('AI stream response body is undefined');
+      }
+
+      return response.body;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new Error(`AI stream open timeout after ${AI_TIMEOUT_MS / 1000}s`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Multi-turn streaming chat completion. Yields plain text deltas as they
+   * arrive. Falls back from PRIMARY_MODEL to FALLBACK_MODEL only if the
+   * connection itself fails to open (auth error, model unavailable, etc.) -
+   * once tokens have started streaming to the caller there is no clean way
+   * to "restart" on a different model, so a mid-stream failure simply ends
+   * the generator (the caller surfaces that as a stream error event).
+   */
+  async *chatStream(message, history = [], context = {}) {
+    const messages = this._buildChatMessages(message, history, context);
+
+    let model = PRIMARY_MODEL;
+    let stream;
+    try {
+      stream = await this.primaryCircuit.execute(() => this._openChatStream(PRIMARY_MODEL, messages));
+    } catch (error) {
+      logger.warn('Primary circuit breaker triggered (chat stream)', { model: PRIMARY_MODEL, error: error.message });
+      model = FALLBACK_MODEL;
+      logger.warn('Falling back to secondary model (chat stream)', { from: PRIMARY_MODEL, to: FALLBACK_MODEL });
+      stream = await this.fallbackCircuit.execute(() => this._openChatStream(FALLBACK_MODEL, messages));
+    }
+
+    logger.info('Streaming AI chat model', { model });
+
+    for await (const event of createSseStream(stream)) {
+      if (event.data === '[DONE]') break;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        continue; // skip malformed/keep-alive frames rather than failing the whole stream
+      }
+
+      const delta = parsed?.choices?.[0]?.delta?.content;
+      if (delta) yield delta;
     }
   }
 }
