@@ -29,6 +29,29 @@ const distributedLimiter = createDistributedRateLimiter({
 
 const aiLimiter = distributedLimiter.createMiddleware();
 
+// ── Chat-specific distributed rate limiter ────────────────────────────────
+// A chat turn is much cheaper than a Firecrawl-backed search (no scraping,
+// far fewer tokens), and a real chat session sends many more messages than
+// a single search - sharing the 10/hr search budget would let a normal
+// conversation lock a user out of property search entirely. Same
+// storage-backed pattern as the search limiter, separate budget/state.
+const chatDistributedLimiter = createDistributedRateLimiter({
+    windowMs: 60 * 60 * 1000, // 1 hour window
+    max: 30,                   // max 30 chat messages per IP per hour
+    keyGenerator: (req) => {
+        const forwarded = req.headers['x-forwarded-for'];
+        return forwarded ? forwarded.split(',')[0].trim() : req.ip;
+    },
+    message: {
+        success: false,
+        message: 'AI chat limit reached (30 messages per hour). Please try again later.',
+        error: 'RATE_LIMIT_EXCEEDED',
+    },
+    storePath: process.env.CHAT_RATE_LIMIT_STORE_PATH || './.rate-limit-store-chat'
+});
+
+const chatLimiter = chatDistributedLimiter.createMiddleware();
+
 // Original route (backend format) — also rate-limited
 router.post('/properties/search', aiLimiter, searchProperties);
 
@@ -38,11 +61,11 @@ router.post('/ai/search', aiLimiter, transformAISearchRequest, searchProperties)
 // Validate user-provided API keys before save/use
 router.post('/ai/validate-keys', validateApiKeys);
 
-// AI chat assistant - shares the AI rate-limit budget with search
-router.post('/ai/chat', aiLimiter, chatWithAI);
+// AI chat assistant - own rate-limit budget, separate from search (see above)
+router.post('/ai/chat', chatLimiter, chatWithAI);
 
 // AI chat assistant (streaming/SSE variant) - same validation, same rate limit
-router.post('/ai/chat/stream', aiLimiter, chatWithAIStream);
+router.post('/ai/chat/stream', chatLimiter, chatWithAIStream);
 
 // Location trends — same rate limit (shares the 10/hr budget)
 router.get('/locations/:city/trends', aiLimiter, getLocationTrends);
@@ -56,10 +79,13 @@ router.delete('/user/properties/:id', protect, deleteUserListing);
 // ── Rate limiter stats (for monitoring) ──────────────────────────────────────
 router.get('/rate-limit/stats', async (req, res) => {
     try {
-        const stats = await distributedLimiter.getStats();
+        const [searchStats, chatStats] = await Promise.all([
+            distributedLimiter.getStats(),
+            chatDistributedLimiter.getStats(),
+        ]);
         res.json({
             success: true,
-            stats,
+            stats: { search: searchStats, chat: chatStats },
             timestamp: new Date().toISOString()
         });
     } catch (error) {
