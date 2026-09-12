@@ -357,6 +357,16 @@ Respond ONLY with this JSON schema:
     if (context.locality) parts.push(`Locality: ${context.locality}`);
     if (context.propertyId) parts.push(`User is currently viewing property ID: ${context.propertyId}`);
     if (context.filters) parts.push(`Active search filters: ${JSON.stringify(context.filters)}`);
+
+    if (Array.isArray(context.matchedProperties) && context.matchedProperties.length > 0) {
+      const listingLines = context.matchedProperties
+        .map((p, i) => `${i + 1}. ${p.title} - ${p.type}, ${p.beds} bed / ${p.baths} bath, ${p.sqm} sqm, ${p.location}, price ${p.price}, ${p.availability}`)
+        .join('\n');
+      parts.push(
+        `These listings were just looked up from the live database for this message - use ONLY these when recommending properties, do not invent others:\n${listingLines}`
+      );
+    }
+
     return parts.length ? `Additional context for this conversation:\n${parts.join('\n')}` : '';
   }
 
