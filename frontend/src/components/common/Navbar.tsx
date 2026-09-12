@@ -33,6 +33,7 @@ const Navbar: React.FC = () => {
     { path: '/', label: 'Home' },
     { path: '/properties', label: 'Properties' },
     { path: '/ai-hub', label: 'AI Property Hub' },
+    { path: '/ai-chat', label: 'AI Chat' },
     { path: '/about', label: 'About' },
     { path: '/contact', label: 'Contact' },
   ];
